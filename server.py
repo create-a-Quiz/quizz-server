@@ -143,7 +143,28 @@ def rangliste(raum):
     )
 
 
+FRAGE_ZEIT = 20
+
+
+def naechste_frage_oder_ende(raum):
+    if raum["frage_index"] + 1 >= len(raum["fragen"]):
+        raum["status"] = "fertig"
+        raum["frage_start"] = None
+    else:
+        raum["frage_index"] += 1
+        raum["antworten"] = set()
+        raum["frage_start"] = time.time()
+
+
+def timer_pruefen(raum):
+    if raum["status"] != "laeuft" or not raum.get("frage_start"):
+        return
+    if time.time() - raum["frage_start"] >= FRAGE_ZEIT:
+        naechste_frage_oder_ende(raum)
+
+
 def raum_ansicht(raum, spieler_id=None):
+    timer_pruefen(raum)
     index = raum["frage_index"]
     status = raum["status"]
     frage_text = ""
@@ -158,6 +179,12 @@ def raum_ansicht(raum, spieler_id=None):
         "frage_index": index,
         "fragen_anzahl": len(raum["fragen"]),
         "frage": frage_text,
+        "zeit_limit": FRAGE_ZEIT,
+        "zeit_uebrig": (
+            max(0, int(FRAGE_ZEIT - (time.time() - raum["frage_start"]) + 0.999))
+            if status == "laeuft" and raum.get("frage_start")
+            else 0
+        ),
         "spieler": [
             {"name": s["name"], "punkte": s["punkte"]}
             for s in raum["spieler"].values()
@@ -191,6 +218,7 @@ def duell_erstellen_route():
             "frage_index": -1,
             "spieler": {},
             "antworten": set(),
+            "frage_start": None,
             "erstellt": time.time()
         }
         DUELLE[code] = raum
@@ -251,6 +279,7 @@ def duell_start_route(code):
         raum["status"] = "laeuft"
         raum["frage_index"] = 0
         raum["antworten"] = set()
+        raum["frage_start"] = time.time()
         return jsonify(raum_ansicht(raum))
 
 
@@ -283,13 +312,10 @@ def duell_antwort_route(code):
 
         raum["antworten"].add(spieler_id)
 
-        # Sobald alle Mitspieler geantwortet haben, geht es gemeinsam weiter.
+        # Sobald alle geantwortet haben, geht es sofort weiter.
+        # Sonst übernimmt der 20-Sekunden-Timer den Wechsel.
         if len(raum["antworten"]) >= len(raum["spieler"]):
-            if raum["frage_index"] + 1 >= len(raum["fragen"]):
-                raum["status"] = "fertig"
-            else:
-                raum["frage_index"] += 1
-                raum["antworten"] = set()
+            naechste_frage_oder_ende(raum)
 
         ansicht = raum_ansicht(raum, spieler_id)
         ansicht["richtig"] = ist_richtig
