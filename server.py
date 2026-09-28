@@ -183,34 +183,55 @@ def ki_quiz_erstellen_route():
             }
         }
 
-        # Bei vorübergehender Gemini-Überlastung automatisch erneut versuchen.
+        # Erst das bevorzugte Modell versuchen. Bei 429/503 wird automatisch
+        # auf Gemini 3.1 Flash-Lite ausgewichen. Jedes Modell bekommt bis zu
+        # drei Versuche mit kurzen Wartezeiten.
         antwort = None
+        verwendetes_modell = None
+        modelle = []
+        for modell in (GEMINI_MODELL, "gemini-3.1-flash-lite"):
+            if modell and modell not in modelle:
+                modelle.append(modell)
+
         wartezeiten = [0, 2, 4]
-        for versuch, wartezeit in enumerate(wartezeiten, start=1):
-            if wartezeit:
-                time.sleep(wartezeit)
+        for modell in modelle:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{modell}:generateContent"
 
-            antwort = requests.post(
-                url,
-                headers={
-                    "x-goog-api-key": GEMINI_API_KEY,
-                    "Content-Type": "application/json"
-                },
-                json=anfrage_daten,
-                timeout=60
-            )
+            for versuch, wartezeit in enumerate(wartezeiten, start=1):
+                if wartezeit:
+                    time.sleep(wartezeit)
 
-            if antwort.ok:
+                antwort = requests.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": GEMINI_API_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    json=anfrage_daten,
+                    timeout=60
+                )
+
+                if antwort.ok:
+                    verwendetes_modell = modell
+                    print(f"Gemini-Erfolg mit Modell: {modell}")
+                    break
+
+                print(
+                    f"Gemini-Fehler {modell} (Versuch {versuch}/{len(wartezeiten)}):",
+                    antwort.status_code,
+                    antwort.text[:1500]
+                )
+
+                # Nur bei vorübergehender Überlastung weiter versuchen/ausweichen.
+                if antwort.status_code not in (429, 503):
+                    break
+
+            if antwort is not None and antwort.ok:
                 break
 
-            print(
-                f"Gemini-Fehler (Versuch {versuch}/{len(wartezeiten)}):",
-                antwort.status_code,
-                antwort.text[:1500]
-            )
-
-            # 429 = zu viele Anfragen, 503 = Dienst vorübergehend überlastet.
-            if antwort.status_code not in (429, 503):
+            # Bei einem dauerhaften Fehler (z. B. 400/403/404) nicht blind
+            # weitere Modelle probieren.
+            if antwort is not None and antwort.status_code not in (429, 503):
                 break
 
         if not antwort.ok:
