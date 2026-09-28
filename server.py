@@ -124,7 +124,7 @@ def quiz_loeschen(quiz_id):
 # -------------------- KI-QUIZ (GEMINI) --------------------
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODELL = os.environ.get("GEMINI_MODELL", "gemini-2.5-flash-lite").strip()
+GEMINI_MODELL = os.environ.get("GEMINI_MODELL", "gemini-3.5-flash-lite").strip()
 
 
 @app.route("/ki-quiz", methods=["POST"])
