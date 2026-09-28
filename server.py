@@ -125,6 +125,16 @@ def quiz_loeschen(quiz_id):
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELL = os.environ.get("GEMINI_MODELL", "gemini-3.5-flash-lite").strip()
+# Nur Modelle, deren Standard-Textnutzung laut Gemini-Preisseite im Free Tier
+# kostenlos angeboten wird. Reihenfolge: leicht/schnell zuerst, danach weitere
+# stabile Flash-Modelle als Ausweichmoeglichkeit bei 429/503.
+GEMINI_KOSTENLOSE_FALLBACKS = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
+]
 
 
 @app.route("/ki-quiz", methods=["POST"])
@@ -183,17 +193,19 @@ def ki_quiz_erstellen_route():
             }
         }
 
-        # Erst das bevorzugte Modell versuchen. Bei 429/503 wird automatisch
-        # auf Gemini 3.1 Flash-Lite ausgewichen. Jedes Modell bekommt bis zu
-        # drei Versuche mit kurzen Wartezeiten.
+        # Erst das bevorzugte Modell versuchen, danach mehrere kostenlose
+        # stabile Flash-Modelle. So hat das Quiz bei temporaerer Auslastung
+        # eines einzelnen Modells eine deutlich bessere Chance.
         antwort = None
         verwendetes_modell = None
         modelle = []
-        for modell in (GEMINI_MODELL, "gemini-3.1-flash-lite"):
+        for modell in [GEMINI_MODELL] + GEMINI_KOSTENLOSE_FALLBACKS:
             if modell and modell not in modelle:
                 modelle.append(modell)
 
-        wartezeiten = [0, 2, 4]
+        # Zwei Versuche je Modell: genug fuer einen kurzen 503/429-Spike,
+        # ohne den Nutzer bei sechs Modellen minutenlang warten zu lassen.
+        wartezeiten = [0, 2]
         for modell in modelle:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{modell}:generateContent"
 
