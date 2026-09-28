@@ -5,6 +5,7 @@ import uuid
 import random
 import threading
 import time
+import requests
 
 app = Flask(__name__)
 
@@ -40,7 +41,8 @@ def oeffentliche_ansicht(quiz):
     return {
         "id": quiz.get("id"),
         "titel": quiz.get("titel"),
-        "fragen": quiz.get("fragen", [])
+        "fragen": quiz.get("fragen", []),
+        "ersteller": quiz.get("ersteller", "Unbekannt")
     }
 
 
@@ -70,7 +72,8 @@ def quiz_veroeffentlichen():
         "id": uuid.uuid4().hex[:8],
         "titel": daten["titel"],
         "fragen": daten["fragen"],
-        "owner_token": daten.get("owner_token", "")
+        "owner_token": daten.get("owner_token", ""),
+        "ersteller": str(daten.get("ersteller", "Unbekannt")).strip()[:30] or "Unbekannt"
     }
     quizze.append(neues_quiz)
     quizze_speichern(quizze)
@@ -94,6 +97,8 @@ def quiz_aktualisieren(quiz_id):
         quiz["titel"] = daten["titel"]
     if "fragen" in daten:
         quiz["fragen"] = daten["fragen"]
+    if "ersteller" in daten:
+        quiz["ersteller"] = str(daten["ersteller"]).strip()[:30] or "Unbekannt"
 
     quizze_speichern(quizze)
     return jsonify(oeffentliche_ansicht(quiz))
@@ -113,6 +118,121 @@ def quiz_loeschen(quiz_id):
     quizze = [q for q in quizze if str(q.get("id")) != str(quiz_id)]
     quizze_speichern(quizze)
     return jsonify({"erfolg": True})
+
+
+
+# -------------------- KI-QUIZ --------------------
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODELL = os.environ.get("OPENAI_MODELL", "gpt-5.6-luna").strip()
+
+
+def _response_text(daten):
+    """Liest den Text robust aus einer Responses-API-Antwort."""
+    teile = []
+    for ausgabe in daten.get("output", []):
+        for inhalt in ausgabe.get("content", []):
+            if inhalt.get("type") == "output_text" and inhalt.get("text"):
+                teile.append(inhalt["text"])
+    return "\n".join(teile).strip()
+
+
+@app.route("/ki-quiz", methods=["POST"])
+def ki_quiz_erstellen_route():
+    daten = request.get_json(silent=True) or {}
+    thema = str(daten.get("thema", "")).strip()[:120]
+    schwierigkeit = str(daten.get("schwierigkeit", "Mittel")).strip()[:20]
+    try:
+        anzahl = int(daten.get("anzahl", 10))
+    except (TypeError, ValueError):
+        anzahl = 10
+    anzahl = max(3, min(20, anzahl))
+
+    if len(thema) < 2:
+        return jsonify({"fehler": "Bitte gib ein Thema ein."}), 400
+    if not OPENAI_API_KEY:
+        return jsonify({"fehler": "Die KI ist auf dem Server noch nicht eingerichtet."}), 503
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "titel": {"type": "string"},
+            "fragen": {
+                "type": "array",
+                "minItems": anzahl,
+                "maxItems": anzahl,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "frage": {"type": "string"},
+                        "antwort": {"type": "string"}
+                    },
+                    "required": ["frage", "antwort"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        "required": ["titel", "fragen"],
+        "additionalProperties": False
+    }
+
+    prompt = (
+        f"Erstelle ein deutschsprachiges Quiz zum Thema: {thema!r}. "
+        f"Schwierigkeit: {schwierigkeit}. Genau {anzahl} Fragen. "
+        "Die Fragen sollen eindeutig, sachlich und für Jugendliche geeignet sein. "
+        "Jede Frage braucht eine kurze, eindeutig prüfbare Antwort. "
+        "Keine Multiple-Choice-Antworten. Vermeide gefährliche Anleitungen, sexuelle Inhalte "
+        "und andere nicht altersgerechte Inhalte. Gib nur Daten gemäß Schema zurück."
+    )
+
+    try:
+        antwort = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": OPENAI_MODELL,
+                "input": prompt,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "quiz",
+                        "strict": True,
+                        "schema": schema
+                    }
+                }
+            },
+            timeout=60
+        )
+        if not antwort.ok:
+            print("OpenAI-Fehler:", antwort.status_code, antwort.text[:1000])
+            return jsonify({"fehler": "Das KI-Quiz konnte gerade nicht erstellt werden."}), 502
+
+        roh = antwort.json()
+        text = _response_text(roh)
+        quiz = json.loads(text)
+
+        fragen = quiz.get("fragen", [])
+        if len(fragen) != anzahl:
+            return jsonify({"fehler": "Die KI hat kein vollständiges Quiz geliefert."}), 502
+
+        sauber = []
+        for frage in fragen:
+            frage_text = str(frage.get("frage", "")).strip()
+            antwort_text = str(frage.get("antwort", "")).strip()
+            if not frage_text or not antwort_text:
+                return jsonify({"fehler": "Die KI hat eine unvollständige Frage geliefert."}), 502
+            sauber.append({"frage": frage_text, "antwort": antwort_text})
+
+        return jsonify({
+            "titel": str(quiz.get("titel") or f"KI-Quiz: {thema}").strip()[:80],
+            "fragen": sauber
+        })
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError) as fehler:
+        print("KI-Quiz-Fehler:", fehler)
+        return jsonify({"fehler": "Das KI-Quiz konnte gerade nicht erstellt werden."}), 502
 
 
 # -------------------- MEHRSPIELER-DUELLE --------------------
