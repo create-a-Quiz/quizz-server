@@ -175,24 +175,55 @@ def ki_quiz_erstellen_route():
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELL}:generateContent"
-        antwort = requests.post(
-            url,
-            headers={
-                "x-goog-api-key": GEMINI_API_KEY,
-                "Content-Type": "application/json"
-            },
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": schema
-                }
-            },
-            timeout=60
-        )
+        anfrage_daten = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": schema
+            }
+        }
+
+        # Bei vorübergehender Gemini-Überlastung automatisch erneut versuchen.
+        antwort = None
+        wartezeiten = [0, 2, 4]
+        for versuch, wartezeit in enumerate(wartezeiten, start=1):
+            if wartezeit:
+                time.sleep(wartezeit)
+
+            antwort = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json=anfrage_daten,
+                timeout=60
+            )
+
+            if antwort.ok:
+                break
+
+            print(
+                f"Gemini-Fehler (Versuch {versuch}/{len(wartezeiten)}):",
+                antwort.status_code,
+                antwort.text[:1500]
+            )
+
+            # 429 = zu viele Anfragen, 503 = Dienst vorübergehend überlastet.
+            if antwort.status_code not in (429, 503):
+                break
+
         if not antwort.ok:
-            print("Gemini-Fehler:", antwort.status_code, antwort.text[:1500])
-            return jsonify({"fehler": "Das KI-Quiz konnte gerade nicht erstellt werden."}), 502
+            if antwort.status_code in (429, 503):
+                return jsonify({
+                    "fehler": (
+                        "Das KI-Quiz konnte aufgrund einer vorübergehend zu hohen "
+                        "Serverauslastung nicht erstellt werden. Bitte versuche es in Kürze erneut."
+                    )
+                }), 503
+            return jsonify({
+                "fehler": "Das KI-Quiz konnte wegen eines Fehlers beim KI-Dienst nicht erstellt werden."
+            }), 502
 
         roh = antwort.json()
         kandidaten = roh.get("candidates", [])
