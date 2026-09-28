@@ -121,20 +121,10 @@ def quiz_loeschen(quiz_id):
 
 
 
-# -------------------- KI-QUIZ --------------------
+# -------------------- KI-QUIZ (GEMINI) --------------------
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_MODELL = os.environ.get("OPENAI_MODELL", "gpt-5.6-luna").strip()
-
-
-def _response_text(daten):
-    """Liest den Text robust aus einer Responses-API-Antwort."""
-    teile = []
-    for ausgabe in daten.get("output", []):
-        for inhalt in ausgabe.get("content", []):
-            if inhalt.get("type") == "output_text" and inhalt.get("text"):
-                teile.append(inhalt["text"])
-    return "\n".join(teile).strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODELL = os.environ.get("GEMINI_MODELL", "gemini-2.5-flash-lite").strip()
 
 
 @app.route("/ki-quiz", methods=["POST"])
@@ -150,30 +140,28 @@ def ki_quiz_erstellen_route():
 
     if len(thema) < 2:
         return jsonify({"fehler": "Bitte gib ein Thema ein."}), 400
-    if not OPENAI_API_KEY:
-        return jsonify({"fehler": "Die KI ist auf dem Server noch nicht eingerichtet."}), 503
+    if not GEMINI_API_KEY:
+        return jsonify({"fehler": "Gemini ist auf dem Server noch nicht eingerichtet."}), 503
 
     schema = {
-        "type": "object",
+        "type": "OBJECT",
         "properties": {
-            "titel": {"type": "string"},
+            "titel": {"type": "STRING"},
             "fragen": {
-                "type": "array",
+                "type": "ARRAY",
                 "minItems": anzahl,
                 "maxItems": anzahl,
                 "items": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "frage": {"type": "string"},
-                        "antwort": {"type": "string"}
+                        "frage": {"type": "STRING"},
+                        "antwort": {"type": "STRING"}
                     },
-                    "required": ["frage", "antwort"],
-                    "additionalProperties": False
+                    "required": ["frage", "antwort"]
                 }
             }
         },
-        "required": ["titel", "fragen"],
-        "additionalProperties": False
+        "required": ["titel", "fragen"]
     }
 
     prompt = (
@@ -182,36 +170,38 @@ def ki_quiz_erstellen_route():
         "Die Fragen sollen eindeutig, sachlich und für Jugendliche geeignet sein. "
         "Jede Frage braucht eine kurze, eindeutig prüfbare Antwort. "
         "Keine Multiple-Choice-Antworten. Vermeide gefährliche Anleitungen, sexuelle Inhalte "
-        "und andere nicht altersgerechte Inhalte. Gib nur Daten gemäß Schema zurück."
+        "und andere nicht altersgerechte Inhalte. Die Lösungen dürfen nicht in den Fragen verraten werden."
     )
 
     try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELL}:generateContent"
         antwort = requests.post(
-            "https://api.openai.com/v1/responses",
+            url,
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "x-goog-api-key": GEMINI_API_KEY,
                 "Content-Type": "application/json"
             },
             json={
-                "model": OPENAI_MODELL,
-                "input": prompt,
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "quiz",
-                        "strict": True,
-                        "schema": schema
-                    }
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema
                 }
             },
             timeout=60
         )
         if not antwort.ok:
-            print("OpenAI-Fehler:", antwort.status_code, antwort.text[:1000])
+            print("Gemini-Fehler:", antwort.status_code, antwort.text[:1500])
             return jsonify({"fehler": "Das KI-Quiz konnte gerade nicht erstellt werden."}), 502
 
         roh = antwort.json()
-        text = _response_text(roh)
+        kandidaten = roh.get("candidates", [])
+        if not kandidaten:
+            print("Gemini-Fehler: keine Kandidaten", str(roh)[:1500])
+            return jsonify({"fehler": "Gemini hat kein Quiz geliefert."}), 502
+
+        teile = kandidaten[0].get("content", {}).get("parts", [])
+        text = "".join(str(t.get("text", "")) for t in teile).strip()
         quiz = json.loads(text)
 
         fragen = quiz.get("fragen", [])
@@ -230,8 +220,8 @@ def ki_quiz_erstellen_route():
             "titel": str(quiz.get("titel") or f"KI-Quiz: {thema}").strip()[:80],
             "fragen": sauber
         })
-    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError) as fehler:
-        print("KI-Quiz-Fehler:", fehler)
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError, IndexError) as fehler:
+        print("Gemini-KI-Quiz-Fehler:", fehler)
         return jsonify({"fehler": "Das KI-Quiz konnte gerade nicht erstellt werden."}), 502
 
 
