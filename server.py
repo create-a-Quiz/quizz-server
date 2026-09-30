@@ -13,6 +13,8 @@ import threading
 import time
 
 import requests
+import hashlib
+import secrets
 
 
 
@@ -33,6 +35,14 @@ DATEINAME = os.path.join(SKRIPT_ORDNER, "server_quizze.json")
 DUELLE = {}
 
 DUELL_LOCK = threading.Lock()
+
+# Kurzlebige Spiel-Sitzungen verhindern, dass Ergebnisse einfach per API hochgezählt werden.
+PLAY_SESSIONS = {}
+PLAY_LOCK = threading.Lock()
+PLAY_SESSION_TTL = 3 * 60 * 60
+
+MELDUNGEN_DATEI = os.path.join(SKRIPT_ORDNER, "server_meldungen.json")
+
 
 
 
@@ -87,7 +97,11 @@ def oeffentliche_ansicht(quiz):
         "fragen": quiz.get("fragen", []),
 
         "ersteller": quiz.get("ersteller", "Unbekannt"),
-        "theme": quiz.get("theme", "auto")
+        "theme": quiz.get("theme", "auto"),
+        "sprache": quiz.get("sprache", "de"),
+        "spiele": int(quiz.get("spiele", 0)),
+        "abgeschlossen": int(quiz.get("abgeschlossen", 0)),
+        "durchschnitt": round(float(quiz.get("summe_prozent", 0)) / max(1, int(quiz.get("abgeschlossen", 0)))) if int(quiz.get("abgeschlossen", 0)) else 0
 
     }
 
@@ -150,7 +164,12 @@ def quiz_veroeffentlichen():
         "owner_token": daten.get("owner_token", ""),
 
         "ersteller": str(daten.get("ersteller", "Unbekannt")).strip()[:30] or "Unbekannt",
-        "theme": str(daten.get("theme", "auto")).strip()[:30] or "auto"
+        "theme": str(daten.get("theme", "auto")).strip()[:30] or "auto",
+        "sprache": str(daten.get("sprache", "de")).strip()[:8] or "de",
+        "spiele": 0,
+        "abgeschlossen": 0,
+        "summe_prozent": 0,
+        "uebersetzungen": {}
 
     }
 
@@ -205,6 +224,10 @@ def quiz_aktualisieren(quiz_id):
     if "theme" in daten:
 
         quiz["theme"] = str(daten["theme"]).strip()[:30] or "auto"
+    if "sprache" in daten:
+        quiz["sprache"] = str(daten["sprache"]).strip()[:8] or "de"
+    if "titel" in daten or "fragen" in daten or "sprache" in daten:
+        quiz["uebersetzungen"] = {}
 
 
 
@@ -214,6 +237,88 @@ def quiz_aktualisieren(quiz_id):
 
 
 
+
+
+def _alte_spiel_sitzungen_loeschen():
+    grenze = time.time() - PLAY_SESSION_TTL
+    for token in list(PLAY_SESSIONS):
+        if PLAY_SESSIONS[token].get("erstellt", 0) < grenze:
+            PLAY_SESSIONS.pop(token, None)
+
+
+@app.route("/quizze/<quiz_id>/start", methods=["POST"])
+def quiz_spiel_start(quiz_id):
+    quizze = quizze_laden(); quiz = quiz_finden(quizze, quiz_id)
+    if not quiz: return jsonify({"fehler": "Quiz nicht gefunden"}), 404
+    quiz["spiele"] = int(quiz.get("spiele", 0)) + 1
+    quizze_speichern(quizze)
+    with PLAY_LOCK:
+        _alte_spiel_sitzungen_loeschen()
+        spiel_token = secrets.token_urlsafe(24)
+        PLAY_SESSIONS[spiel_token] = {"quiz_id": str(quiz_id), "erstellt": time.time(), "benutzt": False}
+    return jsonify({"spiele": quiz["spiele"], "spiel_token": spiel_token})
+
+
+@app.route("/quizze/<quiz_id>/ergebnis", methods=["POST"])
+def quiz_ergebnis(quiz_id):
+    daten = request.get_json(silent=True) or {}
+    try: prozent = max(0, min(100, int(daten.get("prozent"))))
+    except (TypeError, ValueError): return jsonify({"fehler": "Ungültiges Ergebnis"}), 400
+    spiel_token = str(daten.get("spiel_token", "")).strip()
+    with PLAY_LOCK:
+        _alte_spiel_sitzungen_loeschen()
+        sitzung = PLAY_SESSIONS.get(spiel_token)
+        if not sitzung or sitzung.get("benutzt") or sitzung.get("quiz_id") != str(quiz_id):
+            return jsonify({"fehler": "Ungültige oder bereits verwendete Spiel-Sitzung."}), 403
+        sitzung["benutzt"] = True
+    quizze = quizze_laden(); quiz = quiz_finden(quizze, quiz_id)
+    if not quiz: return jsonify({"fehler": "Quiz nicht gefunden"}), 404
+    quiz["abgeschlossen"] = int(quiz.get("abgeschlossen", 0)) + 1
+    quiz["summe_prozent"] = int(quiz.get("summe_prozent", 0)) + prozent
+    quizze_speichern(quizze)
+    return jsonify(oeffentliche_ansicht(quiz))
+
+
+def meldungen_laden():
+    if os.path.exists(MELDUNGEN_DATEI):
+        try:
+            with open(MELDUNGEN_DATEI, "r", encoding="utf-8") as datei:
+                daten = json.load(datei)
+                return daten if isinstance(daten, list) else []
+        except (OSError, ValueError, TypeError):
+            return []
+    return []
+
+
+def meldungen_speichern(meldungen):
+    with open(MELDUNGEN_DATEI, "w", encoding="utf-8") as datei:
+        json.dump(meldungen, datei, ensure_ascii=False, indent=2)
+
+
+@app.route("/quizze/<quiz_id>/melden", methods=["POST"])
+def quiz_melden(quiz_id):
+    daten = request.get_json(silent=True) or {}
+    grund = str(daten.get("grund", "")).strip()[:300]
+    if len(grund) < 5:
+        return jsonify({"fehler": "Bitte beschreibe den Grund kurz."}), 400
+    quiz = quiz_finden(quizze_laden(), quiz_id)
+    if not quiz:
+        return jsonify({"fehler": "Quiz nicht gefunden"}), 404
+    geraet = request.headers.get("X-Device-Token", "").strip()
+    if not geraet:
+        return jsonify({"fehler": "Gerätekennung fehlt."}), 400
+    geraet_hash = hashlib.sha256(geraet.encode("utf-8")).hexdigest()
+    meldungen = meldungen_laden()
+    if any(str(m.get("quiz_id")) == str(quiz_id) and m.get("geraet_hash") == geraet_hash and m.get("status") == "offen" for m in meldungen):
+        return jsonify({"fehler": "Du hast dieses Quiz bereits gemeldet."}), 409
+    meldung = {
+        "id": uuid.uuid4().hex[:10], "quiz_id": str(quiz_id),
+        "quiz_titel": str(quiz.get("titel", "Ohne Titel"))[:100],
+        "grund": grund, "geraet_hash": geraet_hash, "status": "offen",
+        "zeit": time.strftime("%Y-%m-%d %H:%M", time.gmtime())
+    }
+    meldungen.append(meldung); meldungen_speichern(meldungen)
+    return jsonify({"erfolg": True, "meldung": "Danke. Die Meldung wurde an den Operator gesendet."}), 201
 
 
 @app.route("/quizze/<quiz_id>", methods=["DELETE"])
@@ -280,6 +385,36 @@ GEMINI_KOSTENLOSE_FALLBACKS = [
 
 
 
+
+
+@app.route("/quizze/<quiz_id>/uebersetzen", methods=["POST"])
+def quiz_uebersetzen_route(quiz_id):
+    daten = request.get_json(silent=True) or {}
+    ziel = str(daten.get("ziel", "")).strip().lower()[:8]
+    erlaubte = {"de":"Deutsch", "en":"Englisch", "es":"Spanisch", "fr":"Französisch", "it":"Italienisch"}
+    if ziel not in erlaubte: return jsonify({"fehler":"Sprache nicht unterstützt."}), 400
+    quizze=quizze_laden(); quiz=quiz_finden(quizze, quiz_id)
+    if not quiz: return jsonify({"fehler":"Quiz nicht gefunden"}), 404
+    if ziel == str(quiz.get("sprache","de")):
+        return jsonify({"titel":quiz.get("titel",""), "fragen":quiz.get("fragen",[]), "sprache":ziel, "automatisch_uebersetzt":False})
+    cache=quiz.setdefault("uebersetzungen", {})
+    if ziel in cache: return jsonify(cache[ziel])
+    if not GEMINI_API_KEY: return jsonify({"fehler":"Übersetzung ist gerade nicht verfügbar."}), 503
+    schema={"type":"OBJECT","properties":{"titel":{"type":"STRING"},"fragen":{"type":"ARRAY","items":{"type":"OBJECT","properties":{"frage":{"type":"STRING"},"antwort":{"type":"STRING"}},"required":["frage","antwort"]}}},"required":["titel","fragen"]}
+    prompt=(f"Übersetze dieses Quiz vollständig ins {erlaubte[ziel]}. Bewahre Bedeutung und Schwierigkeit. "
+            "Übersetze Titel, Fragen und Antworten. Bei Eigennamen und Fachbegriffen bleibe sachlich. Gib nur das geforderte JSON zurück.\n" +
+            json.dumps({"titel":quiz.get("titel",""),"fragen":quiz.get("fragen",[])}, ensure_ascii=False))
+    try:
+        url=f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELL}:generateContent"
+        r=requests.post(url,headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"},json={"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema}},timeout=60)
+        if not r.ok: return jsonify({"fehler":"Übersetzung konnte nicht erstellt werden."}), 502
+        roh=r.json(); teile=roh.get("candidates",[{}])[0].get("content",{}).get("parts",[])
+        ergebnis=json.loads("".join(str(t.get("text","")) for t in teile))
+        if len(ergebnis.get("fragen",[])) != len(quiz.get("fragen",[])): return jsonify({"fehler":"Übersetzung war unvollständig."}), 502
+        out={"titel":str(ergebnis.get("titel",quiz.get("titel","")))[:100],"fragen":ergebnis["fragen"],"sprache":ziel,"automatisch_uebersetzt":True}
+        cache[ziel]=out; quizze_speichern(quizze); return jsonify(out)
+    except (requests.exceptions.RequestException, ValueError, TypeError, IndexError, KeyError):
+        return jsonify({"fehler":"Übersetzung konnte gerade nicht erstellt werden."}), 502
 
 
 @app.route("/ki-quiz", methods=["POST"])
@@ -624,6 +759,25 @@ def operator_status():
     return jsonify({
         "operator": bool(OPERATOR_DEVICE_TOKEN) and geraet == OPERATOR_DEVICE_TOKEN
     })
+
+
+@app.route("/operator/meldungen", methods=["GET"])
+def operator_meldungen():
+    if not operator_erlaubt():
+        return jsonify({"fehler": "Keine Operator-Berechtigung."}), 403
+    return jsonify([{k:v for k,v in m.items() if k != "geraet_hash"} for m in meldungen_laden()])
+
+
+@app.route("/operator/meldungen/<meldung_id>", methods=["DELETE"])
+def operator_meldung_erledigen(meldung_id):
+    if not operator_erlaubt():
+        return jsonify({"fehler": "Keine Operator-Berechtigung."}), 403
+    meldungen = meldungen_laden()
+    neu = [m for m in meldungen if str(m.get("id")) != str(meldung_id)]
+    if len(neu) == len(meldungen):
+        return jsonify({"fehler": "Meldung nicht gefunden."}), 404
+    meldungen_speichern(neu)
+    return jsonify({"erfolg": True})
 
 
 def special_oeffentlich(special):
