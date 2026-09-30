@@ -391,11 +391,14 @@ GEMINI_KOSTENLOSE_FALLBACKS = [
 def quiz_uebersetzen_route(quiz_id):
     daten = request.get_json(silent=True) or {}
     ziel = str(daten.get("ziel", "")).strip().lower()[:8]
+    force = bool(daten.get("force", False))
     erlaubte = {"de":"Deutsch", "en":"Englisch", "es":"Spanisch", "fr":"Französisch", "it":"Italienisch"}
     if ziel not in erlaubte: return jsonify({"fehler":"Sprache nicht unterstützt."}), 400
     quizze=quizze_laden(); quiz=quiz_finden(quizze, quiz_id)
     if not quiz: return jsonify({"fehler":"Quiz nicht gefunden"}), 404
-    if ziel == str(quiz.get("sprache","de")):
+    # Ältere Quizze können eine falsche Sprach-Markierung besitzen. Bei force
+    # wird der Inhalt deshalb trotzdem von Gemini in die Zielsprache übertragen.
+    if ziel == str(quiz.get("sprache","de")) and not force:
         return jsonify({"titel":quiz.get("titel",""), "fragen":quiz.get("fragen",[]), "sprache":ziel, "automatisch_uebersetzt":False})
     cache=quiz.setdefault("uebersetzungen", {})
     if ziel in cache: return jsonify(cache[ziel])
