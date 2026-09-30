@@ -401,7 +401,11 @@ def quiz_uebersetzen_route(quiz_id):
     if ziel == str(quiz.get("sprache","de")) and not force:
         return jsonify({"titel":quiz.get("titel",""), "fragen":quiz.get("fragen",[]), "sprache":ziel, "automatisch_uebersetzt":False})
     cache=quiz.setdefault("uebersetzungen", {})
-    if ziel in cache: return jsonify(cache[ziel])
+    # force bedeutet: Inhalt wirklich neu in die gewünschte Sprache übersetzen.
+    # Dadurch werden auch alte/falsch markierte Quizze korrigiert und ein
+    # veralteter Cache kann nicht wieder deutsche Fragen/Antworten liefern.
+    if ziel in cache and not force:
+        return jsonify(cache[ziel])
     if not GEMINI_API_KEY: return jsonify({"fehler":"Übersetzung ist gerade nicht verfügbar."}), 503
     schema={"type":"OBJECT","properties":{"titel":{"type":"STRING"},"fragen":{"type":"ARRAY","items":{"type":"OBJECT","properties":{"frage":{"type":"STRING"},"antwort":{"type":"STRING"}},"required":["frage","antwort"]}}},"required":["titel","fragen"]}
     prompt=(f"Übersetze dieses Quiz vollständig ins {erlaubte[ziel]}. Bewahre Bedeutung und Schwierigkeit. "
@@ -416,6 +420,41 @@ def quiz_uebersetzen_route(quiz_id):
         if len(ergebnis.get("fragen",[])) != len(quiz.get("fragen",[])): return jsonify({"fehler":"Übersetzung war unvollständig."}), 502
         out={"titel":str(ergebnis.get("titel",quiz.get("titel","")))[:100],"fragen":ergebnis["fragen"],"sprache":ziel,"automatisch_uebersetzt":True}
         cache[ziel]=out; quizze_speichern(quizze); return jsonify(out)
+    except (requests.exceptions.RequestException, ValueError, TypeError, IndexError, KeyError):
+        return jsonify({"fehler":"Übersetzung konnte gerade nicht erstellt werden."}), 502
+
+
+
+@app.route("/uebersetzen-inhalt", methods=["POST"])
+def inhalt_uebersetzen_route():
+    """Übersetzt einen beliebigen Quiz-Inhalt (lokal, Special oder öffentlich)."""
+    daten = request.get_json(silent=True) or {}
+    ziel = str(daten.get("ziel", "")).strip().lower()[:8]
+    erlaubte = {"de":"Deutsch", "en":"Englisch", "es":"Spanisch", "fr":"Französisch", "it":"Italienisch"}
+    if ziel not in erlaubte:
+        return jsonify({"fehler":"Sprache nicht unterstützt."}), 400
+    titel = str(daten.get("titel", "")).strip()[:100]
+    fragen = daten.get("fragen", [])
+    if not isinstance(fragen, list) or not fragen:
+        return jsonify({"fehler":"Keine Fragen zum Übersetzen vorhanden."}), 400
+    if not GEMINI_API_KEY:
+        return jsonify({"fehler":"Übersetzung ist gerade nicht verfügbar."}), 503
+    schema={"type":"OBJECT","properties":{"titel":{"type":"STRING"},"fragen":{"type":"ARRAY","items":{"type":"OBJECT","properties":{"frage":{"type":"STRING"},"antwort":{"type":"STRING"}},"required":["frage","antwort"]}}},"required":["titel","fragen"]}
+    prompt=(f"Übertrage dieses Quiz vollständig und ausschließlich ins {erlaubte[ziel]}. "
+            "Jede Frage und jede erwartete Antwort muss in dieser Zielsprache stehen. "
+            "Eine Antwort in einer anderen Sprache soll nicht als alternative Lösung ergänzt werden. "
+            "Eigennamen dürfen unverändert bleiben. Gib nur das geforderte JSON zurück.\n" +
+            json.dumps({"titel":titel,"fragen":fragen}, ensure_ascii=False))
+    try:
+        url=f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELL}:generateContent"
+        r=requests.post(url,headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"},json={"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema}},timeout=60)
+        if not r.ok:
+            return jsonify({"fehler":"Übersetzung konnte nicht erstellt werden."}), 502
+        roh=r.json(); teile=roh.get("candidates",[{}])[0].get("content",{}).get("parts",[])
+        ergebnis=json.loads("".join(str(t.get("text","")) for t in teile))
+        if len(ergebnis.get("fragen",[])) != len(fragen):
+            return jsonify({"fehler":"Übersetzung war unvollständig."}), 502
+        return jsonify({"titel":str(ergebnis.get("titel",titel))[:100],"fragen":ergebnis["fragen"],"sprache":ziel,"automatisch_uebersetzt":True})
     except (requests.exceptions.RequestException, ValueError, TypeError, IndexError, KeyError):
         return jsonify({"fehler":"Übersetzung konnte gerade nicht erstellt werden."}), 502
 
