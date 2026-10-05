@@ -86,6 +86,38 @@ def quiz_finden(quizze, quiz_id):
 
 
 
+def sichere_geheimnis_pruefung(empfangen, erwartet):
+    """Vergleicht geheime Tokens ohne frühes Abbrechen beim ersten Unterschied."""
+    empfangen = str(empfangen or "")
+    erwartet = str(erwartet or "")
+    return bool(erwartet) and secrets.compare_digest(empfangen, erwartet)
+
+
+def quiz_eingaben_pruefen(daten):
+    """Kleine serverseitige Größen-/Typprüfung gegen kaputte oder riesige Requests."""
+    if not isinstance(daten, dict):
+        return "Ungültige Daten."
+    titel = daten.get("titel")
+    fragen = daten.get("fragen")
+    if not isinstance(titel, str) or not (1 <= len(titel.strip()) <= 120):
+        return "Der Quiztitel muss 1 bis 120 Zeichen lang sein."
+    if not isinstance(fragen, list) or len(fragen) > 100:
+        return "Ein Quiz darf höchstens 100 Fragen enthalten."
+    for eintrag in fragen:
+        if not isinstance(eintrag, dict):
+            return "Ungültiges Fragenformat."
+        frage = eintrag.get("frage")
+        antwort = eintrag.get("antwort")
+        if not isinstance(frage, str) or not isinstance(antwort, str):
+            return "Frage und Antwort müssen Text sein."
+        if not frage.strip() or not antwort.strip() or len(frage) > 1000 or len(antwort) > 1000:
+            return "Frage und Antwort müssen 1 bis 1000 Zeichen lang sein."
+    token = str(daten.get("owner_token", ""))
+    if token and not (32 <= len(token) <= 256):
+        return "Ungültige Besitzerkennung."
+    return None
+
+
 def oeffentliche_ansicht(quiz):
 
     return {
@@ -149,7 +181,9 @@ def quiz_veroeffentlichen():
 
         return jsonify({"fehler": "Titel und Fragen sind erforderlich"}), 400
 
-
+    fehler = quiz_eingaben_pruefen(daten)
+    if fehler:
+        return jsonify({"fehler": fehler}), 400
 
     quizze = quizze_laden()
 
@@ -203,11 +237,18 @@ def quiz_aktualisieren(quiz_id):
 
         return jsonify({"fehler": "Quiz nicht gefunden"}), 404
 
-    if quiz.get("owner_token") != daten.get("owner_token"):
+    if not sichere_geheimnis_pruefung(daten.get("owner_token"), quiz.get("owner_token")):
 
         return jsonify({"fehler": "Keine Berechtigung für dieses Quiz"}), 403
 
-
+    pruef_daten = {
+        "titel": daten.get("titel", quiz.get("titel", "")),
+        "fragen": daten.get("fragen", quiz.get("fragen", [])),
+        "owner_token": daten.get("owner_token", "")
+    }
+    fehler = quiz_eingaben_pruefen(pruef_daten)
+    if fehler:
+        return jsonify({"fehler": fehler}), 400
 
     if "titel" in daten:
 
@@ -337,7 +378,7 @@ def quiz_loeschen(quiz_id):
 
         return jsonify({"fehler": "Quiz nicht gefunden"}), 404
 
-    if quiz.get("owner_token") != daten.get("owner_token"):
+    if not sichere_geheimnis_pruefung(daten.get("owner_token"), quiz.get("owner_token")):
 
         return jsonify({"fehler": "Keine Berechtigung für dieses Quiz"}), 403
 
@@ -468,6 +509,9 @@ def ki_quiz_erstellen_route():
     thema = str(daten.get("thema", "")).strip()[:120]
 
     schwierigkeit = str(daten.get("schwierigkeit", "Mittel")).strip()[:20]
+    ziel_code = str(daten.get("sprache", "de")).strip().lower()[:8]
+    sprach_namen = {"de":"Deutsch", "en":"Englisch", "fr":"Französisch", "es":"Spanisch", "it":"Italienisch"}
+    ziel_sprache = sprach_namen.get(ziel_code, "Deutsch")
 
     try:
 
@@ -535,7 +579,7 @@ def ki_quiz_erstellen_route():
 
     prompt = (
 
-        f"Erstelle ein deutschsprachiges Quiz zum Thema: {thema!r}. "
+        f"Erstelle ein Quiz vollständig auf {ziel_sprache} zum Thema: {thema!r}. "
 
         f"Schwierigkeit: {schwierigkeit}. Genau {anzahl} Fragen. "
 
@@ -790,8 +834,8 @@ def specials_speichern(specials):
 def operator_erlaubt():
     schluessel = request.headers.get("X-Operator-Key", "").strip()
     geraet = request.headers.get("X-Device-Token", "").strip()
-    key_ok = bool(OPERATOR_KEY) and schluessel == OPERATOR_KEY
-    geraet_ok = bool(OPERATOR_DEVICE_TOKEN) and geraet == OPERATOR_DEVICE_TOKEN
+    key_ok = sichere_geheimnis_pruefung(schluessel, OPERATOR_KEY)
+    geraet_ok = sichere_geheimnis_pruefung(geraet, OPERATOR_DEVICE_TOKEN)
     return key_ok or geraet_ok
 
 
@@ -799,7 +843,7 @@ def operator_erlaubt():
 def operator_status():
     geraet = request.headers.get("X-Device-Token", "").strip()
     return jsonify({
-        "operator": bool(OPERATOR_DEVICE_TOKEN) and geraet == OPERATOR_DEVICE_TOKEN
+        "operator": sichere_geheimnis_pruefung(geraet, OPERATOR_DEVICE_TOKEN)
     })
 
 
@@ -832,7 +876,8 @@ def special_oeffentlich(special):
         "emoji": special.get("emoji", "⭐"),
         "start": special.get("start", ""),
         "ende": special.get("ende", ""),
-        "aktiv": bool(special.get("aktiv", True))
+        "aktiv": bool(special.get("aktiv", True)),
+        "sprache": special.get("sprache", "de")
     }
 
 
@@ -880,7 +925,8 @@ def operator_special_erstellen():
         "emoji": str(daten.get("emoji", "⭐")).strip()[:4] or "⭐",
         "start": str(daten.get("start", "")).strip()[:10],
         "ende": str(daten.get("ende", "")).strip()[:10],
-        "aktiv": bool(daten.get("aktiv", True))
+        "aktiv": bool(daten.get("aktiv", True)),
+        "sprache": str(daten.get("sprache", "de")).strip()[:8] or "de"
     }
     specials = specials_laden()
     specials.append(special)
