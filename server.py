@@ -1235,6 +1235,11 @@ def raum_ansicht(raum, spieler_id=None):
 
         ],
 
+        "rueckblick": [
+            {"frage": str(f.get("frage", "")), "antwort": str(f.get("antwort", ""))}
+            for f in raum["fragen"]
+        ] if status == "fertig" else [],
+
         "rangliste": rangliste(raum),
 
         "hat_geantwortet": (
@@ -1309,6 +1314,30 @@ def duell_erstellen_route():
 
 
 
+
+
+@app.route("/duelle/<code>/rueckspiel", methods=["POST"])
+def duell_rueckspiel_route(code):
+    """Host creates a fresh waiting room with the same questions."""
+    daten = request.get_json(silent=True) or {}
+    with DUELL_LOCK:
+        alt = DUELLE.get(str(code))
+        if not alt:
+            return jsonify({"fehler": "Raumcode nicht gefunden."}), 404
+        if daten.get("host_token") != alt["host_token"]:
+            return jsonify({"fehler": "Nur der Host darf ein Rückspiel erstellen."}), 403
+        if alt["status"] != "fertig":
+            return jsonify({"fehler": "Das Duell ist noch nicht beendet."}), 409
+        neu_code = neuer_raumcode()
+        token = uuid.uuid4().hex
+        neu = {"code": neu_code, "host_token": token, "titel": alt["titel"],
+               "fragen": alt["fragen"], "sprachversionen": alt.get("sprachversionen", {}).copy(),
+               "status": "warten", "frage_index": -1, "spieler": {},
+               "antworten": set(), "frage_start": None, "erstellt": time.time()}
+        DUELLE[neu_code] = neu
+        ansicht = raum_ansicht(neu)
+        ansicht["host_token"] = token
+        return jsonify(ansicht), 201
 
 
 @app.route("/duelle/<code>/beitreten", methods=["POST"])
