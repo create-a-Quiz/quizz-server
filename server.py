@@ -387,7 +387,7 @@ def einzelne_frage_melden():
     frage = str(daten.get("frage", "")).strip()[:500]
     grund = str(daten.get("grund", "")).strip()[:80]
     if len(frage) < 5 or grund not in {"Falsche Antwort", "Unklare Frage", "Schreibfehler", "Falsche Übersetzung",
-                                       "Wrong answer", "Unclear question", "Typo", "Wrong translation",
+                                       "Wrong answer", "Unclear question", "Typo", "Wrong translation", "Unangemessene Inhalte", "Inappropriate content", "Contenu inapproprié", "Contenido inapropiado", "Contenuti inappropriati",
                                        "Mauvaise réponse", "Question ambiguë", "Faute de frappe", "Mauvaise traduction",
                                        "Respuesta incorrecta", "Pregunta confusa", "Error de escritura", "Mala traducción",
                                        "Risposta errata", "Domanda poco chiara", "Errore di scrittura", "Traduzione errata"}:
