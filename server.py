@@ -1585,6 +1585,79 @@ def duell_antwort_route(code):
 
 
 
+# Tageslimit fuer den bestehenden /ki-quiz-Endpunkt aktivieren.
+# Andere KI-Funktionen bleiben unveraendert.
+"""Kostenloses Tageslimit fuer erfolgreiche KI-Quiz-Erstellungen.
+
+SQLite muss auf einem persistenten Datentraeger liegen (DATA_DIR).
+Eine Geraetekennung ist vorerst keine sichere Nutzeranmeldung.
+"""
+import sqlite3
+from datetime import datetime, timezone
+from functools import wraps
+
+
+TAGESLIMIT = 3
+RESERVIERUNG_SEKUNDEN = 30 * 60
+
+
+def _verbindung():
+    ordner = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(ordner, exist_ok=True)
+    db = sqlite3.connect(os.path.join(ordner, 'ki_limit.sqlite3'), timeout=15)
+    db.execute('PRAGMA busy_timeout=15000')
+    db.execute('CREATE TABLE IF NOT EXISTS ki_verbrauch (nutzer TEXT NOT NULL, tag TEXT NOT NULL, anzahl INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(nutzer, tag))')
+    db.execute('CREATE TABLE IF NOT EXISTS ki_reservierungen (id TEXT PRIMARY KEY, nutzer TEXT NOT NULL, tag TEXT NOT NULL, ablauf REAL NOT NULL)')
+    db.commit()
+    return db
+
+
+def kostenloses_ki_limit(route):
+    @wraps(route)
+    def wrapper(*args, **kwargs):
+        token = request.headers.get('X-Device-Token', '').strip()
+        if not 20 <= len(token) <= 256:
+            return jsonify({'fehler': 'Gerätekennung fehlt. Bitte App aktualisieren.'}), 400
+        nutzer = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        tag = datetime.now(timezone.utc).date().isoformat()
+        reservierung = uuid.uuid4().hex
+        db = _verbindung()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM ki_reservierungen WHERE ablauf < ?', (time.time(),))
+            genutzt = db.execute('SELECT anzahl FROM ki_verbrauch WHERE nutzer=? AND tag=?', (nutzer, tag)).fetchone()
+            offen = db.execute('SELECT COUNT(*) FROM ki_reservierungen WHERE nutzer=? AND tag=?', (nutzer, tag)).fetchone()[0]
+            if (genutzt[0] if genutzt else 0) + offen >= TAGESLIMIT:
+                db.commit()
+                return jsonify({'fehler': 'Du hast heute bereits 3 KI-Quizze erstellt. Morgen kannst du wieder neue erstellen.', 'limit': TAGESLIMIT, 'verbleibend': 0}), 429
+            db.execute('INSERT INTO ki_reservierungen(id, nutzer, tag, ablauf) VALUES(?,?,?,?)', (reservierung, nutzer, tag, time.time() + RESERVIERUNG_SEKUNDEN))
+            db.commit()
+        finally:
+            db.close()
+
+        erfolgreich = False
+        try:
+            antwort = route(*args, **kwargs)
+            # Nur erfolgreich generierte Quizze zaehlen.
+            status = antwort[1] if isinstance(antwort, tuple) and len(antwort) > 1 else getattr(antwort, 'status_code', 200)
+            erfolgreich = 200 <= status < 300
+            return antwort
+        finally:
+            db = _verbindung()
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('DELETE FROM ki_reservierungen WHERE id=?', (reservierung,))
+                if erfolgreich:
+                    db.execute('INSERT INTO ki_verbrauch(nutzer, tag, anzahl) VALUES(?,?,1) ON CONFLICT(nutzer,tag) DO UPDATE SET anzahl=anzahl+1', (nutzer, tag))
+                db.commit()
+            finally:
+                db.close()
+    return wrapper
+
+# KI-Tageslimit in dieser einen Serverdatei enthalten.
+app.view_functions["ki_quiz_erstellen_route"] = kostenloses_ki_limit(app.view_functions["ki_quiz_erstellen_route"])
+
+
 if __name__ == "__main__":
 
     app.run(host="0.0.0.0", port=5001, debug=False)
